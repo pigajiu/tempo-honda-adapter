@@ -415,4 +415,7 @@
     <string name="undraw_page">unDraw</string>
     <string name="undraw_thanks">A special thanks goes to unDraw without whose illustrations we could not have made this application more beautiful.</string>
     <string name="undraw_url">https://undraw.co/</string>
+    <string name="settings_bluetooth_lyrics_category">Bluetooth lyrics</string>
+    <string name="settings_bluetooth_lyrics_title">Show synchronized lyrics on Bluetooth displays</string>
+    <string name="settings_bluetooth_lyrics_summary">When A2DP is connected, publish the current lyric as the AVRCP title and keep the song and artist on the artist line.</string>
 </resources>

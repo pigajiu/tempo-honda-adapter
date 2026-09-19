@@ -9,6 +9,7 @@ import com.google.gson.Gson
 
 object Preferences {
     const val THEME = "theme"
+    const val BLUETOOTH_LYRICS = "bluetooth_lyrics"
     private const val SERVER = "server"
     private const val USER = "user"
     private const val PASSWORD = "password"
@@ -495,5 +496,10 @@ object Preferences {
         return App.getInstance().preferences.getLong(
                 LAST_INSTANT_MIX, 0
         ) + 5000 < System.currentTimeMillis()
+    }
+
+    @JvmStatic
+    fun isBluetoothLyricsEnabled(): Boolean {
+        return App.getInstance().preferences.getBoolean(BLUETOOTH_LYRICS, true)
     }
 }

@@ -33,6 +33,7 @@ class MediaService : MediaLibraryService() {
     private lateinit var player: ExoPlayer
     private lateinit var mediaLibrarySession: MediaLibrarySession
     private lateinit var customCommands: List<CommandButton>
+    private lateinit var bluetoothLyricsAdapter: BluetoothLyricsAdapter
 
     private var customLayout = ImmutableList.of<CommandButton>()
 
@@ -49,6 +50,7 @@ class MediaService : MediaLibraryService() {
         initializeCustomCommands()
         initializePlayer()
         initializeMediaLibrarySession()
+        bluetoothLyricsAdapter = BluetoothLyricsAdapter(this, player).also { it.start() }
         initializePlayerListener()
 
         setPlayer(player)
@@ -232,6 +234,7 @@ class MediaService : MediaLibraryService() {
     }
 
     private fun releasePlayer() {
+        if (this::bluetoothLyricsAdapter.isInitialized) bluetoothLyricsAdapter.release()
         player.release()
         mediaLibrarySession.release()
     }

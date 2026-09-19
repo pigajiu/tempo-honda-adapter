@@ -396,4 +396,7 @@
     <string name="playlist_editor_dialog_action_delete_toast">长按删除</string>
     <string name="server_signup_dialog_action_delete_toast">长按删除</string>
     <string name="server_signup_dialog_hint_local_address">本地 URL</string>
+    <string name="settings_bluetooth_lyrics_category">蓝牙歌词</string>
+    <string name="settings_bluetooth_lyrics_title">在蓝牙设备上显示同步歌词</string>
+    <string name="settings_bluetooth_lyrics_summary">连接 A2DP 后，将当前歌词作为 AVRCP 标题发送，并在歌手栏保留歌名和歌手。</string>
 </resources>

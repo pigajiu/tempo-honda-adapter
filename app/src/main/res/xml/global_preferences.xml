@@ -15,6 +15,14 @@
             android:title="@string/settings_logout_title"/>
     </PreferenceCategory>
 
+    <PreferenceCategory app:title="@string/settings_bluetooth_lyrics_category">
+        <SwitchPreference
+            android:key="bluetooth_lyrics"
+            android:defaultValue="true"
+            android:title="@string/settings_bluetooth_lyrics_title"
+            android:summary="@string/settings_bluetooth_lyrics_summary" />
+    </PreferenceCategory>
+
     <PreferenceCategory app:title="@string/settings_title_ui">
         <ListPreference
             app:defaultValue="default"

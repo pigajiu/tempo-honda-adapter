@@ -33,6 +33,7 @@ class MediaService : MediaLibraryService(), SessionAvailabilityListener {
     private lateinit var player: ExoPlayer
     private lateinit var castPlayer: CastPlayer
     private lateinit var mediaLibrarySession: MediaLibrarySession
+    private lateinit var bluetoothLyricsAdapter: BluetoothLyricsAdapter
 
     override fun onCreate() {
         super.onCreate()
@@ -41,6 +42,7 @@ class MediaService : MediaLibraryService(), SessionAvailabilityListener {
         initializePlayer()
         initializeCastPlayer()
         initializeMediaLibrarySession()
+        bluetoothLyricsAdapter = BluetoothLyricsAdapter(this, player).also { it.start() }
         initializePlayerListener()
 
         setPlayer(
@@ -187,6 +189,7 @@ class MediaService : MediaLibraryService(), SessionAvailabilityListener {
     }
 
     private fun releasePlayer() {
+        if (this::bluetoothLyricsAdapter.isInitialized) bluetoothLyricsAdapter.release()
         if (this::castPlayer.isInitialized) castPlayer.setSessionAvailabilityListener(null)
         if (this::castPlayer.isInitialized) castPlayer.release()
         player.release()
