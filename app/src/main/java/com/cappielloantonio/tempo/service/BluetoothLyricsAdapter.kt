@@ -29,6 +29,8 @@ import com.cappielloantonio.tempo.util.Preferences
 import retrofit2.Call
 import retrofit2.Callback
 import retrofit2.Response
+import org.json.JSONArray
+import org.json.JSONObject
 import java.io.ByteArrayOutputStream
 
 /**
@@ -48,6 +50,7 @@ class BluetoothLyricsAdapter(
     private val handler = Handler(Looper.getMainLooper())
     private val audioManager = appContext.getSystemService(AudioManager::class.java)
     private val sharedPreferences = PreferenceManager.getDefaultSharedPreferences(appContext)
+    private val lyricsCache = appContext.getSharedPreferences(LYRICS_CACHE_PREFS, Context.MODE_PRIVATE)
     private val lrcTimestamp = Regex("\\[(\\d{1,3}):(\\d{1,2})(?:[.:](\\d{1,3}))?]")
 
     private var sourceMediaItem: MediaItem? = null
@@ -118,6 +121,20 @@ class BluetoothLyricsAdapter(
         } else {
             handler.removeCallbacks(lyricTicker)
         }
+    }
+
+    override fun onMediaMetadataChanged(mediaMetadata: MediaMetadata) {
+        val current = player.currentMediaItem ?: return
+        if (activeMediaId != current.mediaId || artworkData != null) return
+
+        val embeddedArtwork = mediaMetadata.artworkData ?: return
+        val source = sourceMediaItem ?: current
+        val mergedMetadata = source.mediaMetadata.buildUpon()
+            .setArtworkData(embeddedArtwork, MediaMetadata.PICTURE_TYPE_FRONT_COVER)
+            .build()
+        sourceMediaItem = source.buildUpon().setMediaMetadata(mergedMetadata).build()
+        Log.d(TAG, "Using embedded artwork from local media metadata mediaId=${current.mediaId}")
+        loadArtwork(sourceMediaItem!!)
     }
 
     override fun onPositionDiscontinuity(
@@ -304,6 +321,14 @@ class BluetoothLyricsAdapter(
     }
 
     private fun loadLyrics(mediaItem: MediaItem, generation: Int) {
+        val cachedLyrics = readCachedLyrics(lyricsCache, mediaItem.mediaId)
+        if (cachedLyrics.isNotEmpty()) {
+            timedLyrics = cachedLyrics
+            displayedLyricIndex = -1
+            Log.d(TAG, "Loaded ${cachedLyrics.size} cached lyric lines for mediaId=${mediaItem.mediaId}")
+            if (shouldPublishLyrics()) scheduleLyricUpdate()
+        }
+
         if (OpenSubsonicExtensionsUtil.isSongLyricsExtensionAvailable()) {
             App.getSubsonicClientInstance(false)
                 .openClient
@@ -328,6 +353,9 @@ class BluetoothLyricsAdapter(
                                 )
                             }
                             .sortedBy { it.startMs }
+                        if (timedLyrics.isNotEmpty()) {
+                            cacheLyrics(lyricsCache, mediaItem.mediaId, timedLyrics)
+                        }
                         displayedLyricIndex = -1
                         if (shouldPublishLyrics()) scheduleLyricUpdate()
                     }
@@ -346,6 +374,9 @@ class BluetoothLyricsAdapter(
                         if (generation != requestGeneration || !response.isSuccessful) return
 
                         timedLyrics = parseLrc(response.body()?.subsonicResponse?.lyrics?.value)
+                        if (timedLyrics.isNotEmpty()) {
+                            cacheLyrics(lyricsCache, mediaItem.mediaId, timedLyrics)
+                        }
                         displayedLyricIndex = -1
                         if (shouldPublishLyrics()) scheduleLyricUpdate()
                     }
@@ -460,14 +491,144 @@ class BluetoothLyricsAdapter(
         player.replaceMediaItem(index, source.buildUpon().setMediaMetadata(metadata).build())
     }
 
-    private companion object {
-        const val EXTRA_MANAGED_METADATA = "com.cappielloantonio.tempo.bluetooth.managed_metadata"
-        const val EXTRA_CURRENT_LYRIC = "com.cappielloantonio.tempo.bluetooth.current_lyric"
-        const val TAG = "BluetoothLyricsAdapter"
-        const val ARTWORK_SIZE_PX = 512
-        const val ARTWORK_JPEG_QUALITY = 90
-        const val LYRIC_BLUETOOTH_LEAD_MS = 120L
-        const val MIN_LYRIC_SCHEDULE_DELAY_MS = 16L
-        const val MAX_LYRIC_SCHEDULE_DELAY_MS = 1000L
+    companion object {
+        private const val EXTRA_MANAGED_METADATA = "com.cappielloantonio.tempo.bluetooth.managed_metadata"
+        private const val EXTRA_CURRENT_LYRIC = "com.cappielloantonio.tempo.bluetooth.current_lyric"
+        private const val LYRICS_CACHE_PREFS = "bluetooth_lyrics_cache"
+        private const val TAG = "BluetoothLyricsAdapter"
+        private const val ARTWORK_SIZE_PX = 512
+        private const val ARTWORK_JPEG_QUALITY = 90
+        private const val LYRIC_BLUETOOTH_LEAD_MS = 120L
+        private const val MIN_LYRIC_SCHEDULE_DELAY_MS = 16L
+        private const val MAX_LYRIC_SCHEDULE_DELAY_MS = 1000L
+        private val cacheLrcTimestamp = Regex("\\[(\\d{1,3}):(\\d{1,2})(?:[.:](\\d{1,3}))?]")
+
+        @JvmStatic
+        fun clearCachedDownloadMetadata(context: Context, mediaId: String) {
+            context.applicationContext
+                .getSharedPreferences(LYRICS_CACHE_PREFS, Context.MODE_PRIVATE)
+                .edit()
+                .remove(mediaId)
+                .apply()
+        }
+
+        @JvmStatic
+        fun prefetchForDownload(context: Context, mediaItem: MediaItem) {
+            val appContext = context.applicationContext
+            val mediaId = mediaItem.mediaId
+            val cache = appContext.getSharedPreferences(LYRICS_CACHE_PREFS, Context.MODE_PRIVATE)
+
+            mediaItem.mediaMetadata.extras?.getString("coverArtId")
+                ?.takeIf { it.isNotBlank() }
+                ?.let { coverArtId ->
+                    Glide.with(appContext)
+                        .asBitmap()
+                        .load(CustomGlideRequest.createUrl(coverArtId, ARTWORK_SIZE_PX))
+                        .preload(ARTWORK_SIZE_PX, ARTWORK_SIZE_PX)
+                }
+
+            if (readCachedLyrics(cache, mediaId).isNotEmpty()) return
+
+            if (OpenSubsonicExtensionsUtil.isSongLyricsExtensionAvailable()) {
+                App.getSubsonicClientInstance(false)
+                    .openClient
+                    .getLyricsBySongId(mediaId)
+                    .enqueue(object : Callback<ApiResponse> {
+                        override fun onResponse(call: Call<ApiResponse>, response: Response<ApiResponse>) {
+                            if (!response.isSuccessful) return
+                            val structured = response.body()
+                                ?.subsonicResponse
+                                ?.lyricsList
+                                ?.structuredLyrics
+                                ?.firstOrNull { it.synced && !it.line.isNullOrEmpty() }
+                                ?: return
+                            val lyrics = structured.line
+                                .orEmpty()
+                                .mapNotNull { line ->
+                                    val start = line.start ?: return@mapNotNull null
+                                    val text = line.value.trim()
+                                    if (text.isEmpty()) null else TimedLyric(
+                                        (start.toLong() + structured.offset).coerceAtLeast(0),
+                                        text
+                                    )
+                                }
+                                .sortedBy { it.startMs }
+                            if (lyrics.isNotEmpty()) cacheLyrics(cache, mediaId, lyrics)
+                        }
+
+                        override fun onFailure(call: Call<ApiResponse>, throwable: Throwable) = Unit
+                    })
+            } else {
+                val title = mediaItem.mediaMetadata.title?.toString().orEmpty()
+                val artist = mediaItem.mediaMetadata.artist?.toString().orEmpty()
+                App.getSubsonicClientInstance(false)
+                    .mediaRetrievalClient
+                    .getLyrics(artist, title)
+                    .enqueue(object : Callback<ApiResponse> {
+                        override fun onResponse(call: Call<ApiResponse>, response: Response<ApiResponse>) {
+                            if (!response.isSuccessful) return
+                            val lyrics = parseCachedLrc(response.body()?.subsonicResponse?.lyrics?.value)
+                            if (lyrics.isNotEmpty()) cacheLyrics(cache, mediaId, lyrics)
+                        }
+
+                        override fun onFailure(call: Call<ApiResponse>, throwable: Throwable) = Unit
+                    })
+            }
+        }
+
+        private fun readCachedLyrics(
+            preferences: SharedPreferences,
+            mediaId: String
+        ): List<TimedLyric> {
+            val raw = preferences.getString(mediaId, null) ?: return emptyList()
+            return runCatching {
+                val array = JSONArray(raw)
+                buildList {
+                    for (index in 0 until array.length()) {
+                        val item = array.getJSONObject(index)
+                        add(TimedLyric(item.getLong("startMs"), item.getString("text")))
+                    }
+                }.sortedBy { it.startMs }
+            }.getOrDefault(emptyList())
+        }
+
+        private fun cacheLyrics(
+            preferences: SharedPreferences,
+            mediaId: String,
+            lyrics: List<TimedLyric>
+        ) {
+            val array = JSONArray()
+            lyrics.forEach { lyric ->
+                array.put(
+                    JSONObject()
+                        .put("startMs", lyric.startMs)
+                        .put("text", lyric.text)
+                )
+            }
+            preferences.edit().putString(mediaId, array.toString()).apply()
+        }
+
+        private fun parseCachedLrc(rawLyrics: String?): List<TimedLyric> {
+            if (rawLyrics.isNullOrBlank()) return emptyList()
+            return rawLyrics.lineSequence()
+                .flatMap { row ->
+                    val text = row.replace(cacheLrcTimestamp, "").trim()
+                    if (text.isEmpty()) return@flatMap emptySequence()
+                    cacheLrcTimestamp.findAll(row).map { match ->
+                        val minutes = match.groupValues[1].toLong()
+                        val seconds = match.groupValues[2].toLong()
+                        val fraction = match.groupValues[3]
+                        val fractionMs = when (fraction.length) {
+                            1 -> fraction.toLong() * 100
+                            2 -> fraction.toLong() * 10
+                            3 -> fraction.toLong()
+                            else -> 0
+                        }
+                        TimedLyric((minutes * 60 + seconds) * 1000 + fractionMs, text)
+                    }
+                }
+                .sortedBy { it.startMs }
+                .toList()
+        }
     }
 }

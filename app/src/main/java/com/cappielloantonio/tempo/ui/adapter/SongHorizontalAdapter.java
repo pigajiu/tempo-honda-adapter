@@ -16,11 +16,14 @@ import com.cappielloantonio.tempo.R;
 import com.cappielloantonio.tempo.databinding.ItemHorizontalTrackBinding;
 import com.cappielloantonio.tempo.glide.CustomGlideRequest;
 import com.cappielloantonio.tempo.interfaces.ClickCallback;
+import com.cappielloantonio.tempo.model.Download;
+import com.cappielloantonio.tempo.service.DownloaderManager;
 import com.cappielloantonio.tempo.subsonic.models.AlbumID3;
 import com.cappielloantonio.tempo.subsonic.models.Child;
 import com.cappielloantonio.tempo.subsonic.models.DiscTitle;
 import com.cappielloantonio.tempo.util.Constants;
 import com.cappielloantonio.tempo.util.DownloadUtil;
+import com.cappielloantonio.tempo.util.MappingUtil;
 import com.cappielloantonio.tempo.util.MusicUtil;
 import com.cappielloantonio.tempo.util.Preferences;
 
@@ -109,11 +112,32 @@ public class SongHorizontalAdapter extends RecyclerView.Adapter<SongHorizontalAd
 
         holder.item.trackNumberTextView.setText(MusicUtil.getReadableTrackNumber(holder.itemView.getContext(), song.getTrack()));
 
-        if (DownloadUtil.getDownloadTracker(holder.itemView.getContext()).isDownloaded(song.getId())) {
-            holder.item.searchResultDownloadIndicatorImageView.setVisibility(View.VISIBLE);
-        } else {
-            holder.item.searchResultDownloadIndicatorImageView.setVisibility(View.GONE);
-        }
+        DownloaderManager downloadManager = DownloadUtil.getDownloadTracker(holder.itemView.getContext());
+        boolean downloaded = downloadManager.isDownloaded(song.getId());
+        holder.item.searchResultDownloadIndicatorImageView.setVisibility(View.VISIBLE);
+        holder.item.searchResultDownloadIndicatorImageView.setTag(downloaded);
+        holder.item.searchResultDownloadIndicatorImageView.setContentDescription(
+                holder.itemView.getContext().getString(
+                        downloaded ? R.string.song_bottom_sheet_remove : R.string.song_bottom_sheet_download
+                )
+        );
+        holder.item.searchResultDownloadIndicatorIcon.setBackgroundResource(
+                downloaded ? R.drawable.ic_delete : R.drawable.ic_download
+        );
+        holder.item.searchResultDownloadIndicatorImageView.setOnClickListener(v -> {
+            boolean isDownloaded = Boolean.TRUE.equals(v.getTag());
+            if (isDownloaded) {
+                downloadManager.remove(MappingUtil.mapDownload(song), new Download(song));
+                v.setTag(false);
+                v.setContentDescription(v.getContext().getString(R.string.song_bottom_sheet_download));
+                holder.item.searchResultDownloadIndicatorIcon.setBackgroundResource(R.drawable.ic_download);
+            } else {
+                downloadManager.download(MappingUtil.mapDownload(song), new Download(song));
+                v.setTag(true);
+                v.setContentDescription(v.getContext().getString(R.string.song_bottom_sheet_remove));
+                holder.item.searchResultDownloadIndicatorIcon.setBackgroundResource(R.drawable.ic_delete);
+            }
+        });
 
         if (showCoverArt) CustomGlideRequest.Builder
                 .from(holder.itemView.getContext(), song.getCoverArtId(), CustomGlideRequest.ResourceType.Song)

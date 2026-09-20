@@ -112,27 +112,47 @@ public class MappingUtil {
     }
 
     public static MediaItem mapDownload(Child media) {
+        Uri uri = Preferences.preferTranscodedDownload()
+                ? MusicUtil.getTranscodedDownloadUri(media.getId())
+                : MusicUtil.getDownloadUri(media.getId());
+        Uri artworkUri = Uri.parse(CustomGlideRequest.createUrl(media.getCoverArtId(), Preferences.getImageSize()));
+
+        Bundle bundle = new Bundle();
+        bundle.putString("id", media.getId());
+        bundle.putString("title", media.getTitle());
+        bundle.putString("album", media.getAlbum());
+        bundle.putString("artist", media.getArtist());
+        bundle.putString("coverArtId", media.getCoverArtId());
+        bundle.putString("type", Constants.MEDIA_TYPE_MUSIC);
+        bundle.putString("uri", uri.toString());
+
         return new MediaItem.Builder()
                 .setMediaId(media.getId())
                 .setMediaMetadata(
                         new MediaMetadata.Builder()
                                 .setTitle(media.getTitle())
+                                .setDisplayTitle(media.getTitle())
                                 .setTrackNumber(media.getTrack() != null ? media.getTrack() : 0)
                                 .setDiscNumber(media.getDiscNumber() != null ? media.getDiscNumber() : 0)
                                 .setReleaseYear(media.getYear() != null ? media.getYear() : 0)
                                 .setAlbumTitle(media.getAlbum())
+                                .setAlbumArtist(media.getArtist())
                                 .setArtist(media.getArtist())
+                                .setSubtitle(media.getArtist())
+                                .setArtworkUri(artworkUri)
+                                .setExtras(bundle)
                                 .setIsBrowsable(false)
                                 .setIsPlayable(true)
                                 .build()
                 )
                 .setRequestMetadata(
                         new MediaItem.RequestMetadata.Builder()
-                                .setMediaUri(Preferences.preferTranscodedDownload() ? MusicUtil.getTranscodedDownloadUri(media.getId()) : MusicUtil.getDownloadUri(media.getId()))
+                                .setMediaUri(uri)
+                                .setExtras(bundle)
                                 .build()
                 )
                 .setMimeType(MimeTypes.BASE_TYPE_AUDIO)
-                .setUri(Preferences.preferTranscodedDownload() ? MusicUtil.getTranscodedDownloadUri(media.getId()) : MusicUtil.getDownloadUri(media.getId()))
+                .setUri(uri)
                 .build();
     }
 

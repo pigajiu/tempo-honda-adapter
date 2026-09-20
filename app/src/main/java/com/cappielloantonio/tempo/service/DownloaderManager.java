@@ -72,6 +72,7 @@ public class DownloaderManager {
     public void download(MediaItem mediaItem, com.cappielloantonio.tempo.model.Download download) {
         download.setDownloadUri(mediaItem.requestMetadata.mediaUri.toString());
 
+        BluetoothLyricsAdapter.prefetchForDownload(context, mediaItem);
         DownloadService.sendAddDownload(context, DownloaderService.class, buildDownloadRequest(mediaItem), false);
         insertDatabase(download);
     }
@@ -86,6 +87,7 @@ public class DownloaderManager {
         DownloadService.sendRemoveDownload(context, DownloaderService.class, buildDownloadRequest(mediaItem).id, false);
         deleteDatabase(download.getId());
         downloads.remove(download.getId());
+        BluetoothLyricsAdapter.clearCachedDownloadMetadata(context, download.getId());
     }
 
     public void remove(List<MediaItem> mediaItems, List<com.cappielloantonio.tempo.model.Download> downloads) {

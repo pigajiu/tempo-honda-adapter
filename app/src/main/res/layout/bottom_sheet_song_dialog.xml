@@ -154,7 +154,8 @@
             android:paddingTop="12dp"
             android:paddingEnd="20dp"
             android:paddingBottom="12dp"
-            android:text="@string/song_bottom_sheet_remove" />
+            android:text="@string/song_bottom_sheet_remove"
+            android:visibility="gone" />
 
         <TextView
             android:id="@+id/add_to_playlist_text_view"

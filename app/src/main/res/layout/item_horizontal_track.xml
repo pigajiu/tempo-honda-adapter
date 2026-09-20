@@ -182,6 +182,7 @@
         tools:visibility="visible">
 
         <ImageView
+            android:id="@+id/search_result_download_indicator_icon"
             android:layout_width="18dp"
             android:layout_height="18dp"
             android:background="@drawable/ic_download"
