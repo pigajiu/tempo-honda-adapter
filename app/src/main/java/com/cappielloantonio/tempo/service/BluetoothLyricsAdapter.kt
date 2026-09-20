@@ -10,13 +10,17 @@ import android.media.AudioManager
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.util.Log
 import androidx.media3.common.MediaItem
+import androidx.media3.common.MediaMetadata
+import androidx.media3.common.PlaybackParameters
 import androidx.media3.common.Player
 import androidx.preference.PreferenceManager
 import com.bumptech.glide.Glide
 import com.bumptech.glide.request.target.CustomTarget
 import com.bumptech.glide.request.transition.Transition
 import com.cappielloantonio.tempo.App
+import com.cappielloantonio.tempo.glide.CustomGlideRequest
 import com.cappielloantonio.tempo.subsonic.base.ApiResponse
 import com.cappielloantonio.tempo.subsonic.models.Line
 import com.cappielloantonio.tempo.util.Constants
@@ -51,6 +55,7 @@ class BluetoothLyricsAdapter(
     private var timedLyrics: List<TimedLyric> = emptyList()
     private var displayedLyricIndex = -1
     private var artworkData: ByteArray? = null
+    private var artworkPublishedMediaId: String? = null
     private var requestGeneration = 0
     private var a2dpConnected = false
     private var artworkTarget: CustomTarget<Bitmap>? = null
@@ -58,9 +63,7 @@ class BluetoothLyricsAdapter(
     private val lyricTicker = object : Runnable {
         override fun run() {
             updateTimedLyric()
-            if (shouldPublishLyrics() && player.isPlaying) {
-                handler.postDelayed(this, LYRIC_POLL_INTERVAL_MS)
-            }
+            scheduleNextLyricTick()
         }
     }
 
@@ -123,7 +126,13 @@ class BluetoothLyricsAdapter(
         reason: Int
     ) {
         displayedLyricIndex = -1
-        if (shouldPublishLyrics()) updateTimedLyric()
+        if (shouldPublishLyrics()) scheduleLyricUpdate()
+    }
+
+    override fun onPlaybackParametersChanged(playbackParameters: PlaybackParameters) {
+        if (shouldPublishLyrics() && player.isPlaying) {
+            scheduleLyricUpdate()
+        }
     }
 
     private fun handleMediaItem(mediaItem: MediaItem?) {
@@ -135,7 +144,8 @@ class BluetoothLyricsAdapter(
         activeMediaId = mediaItem?.mediaId
         timedLyrics = emptyList()
         displayedLyricIndex = -1
-        artworkData = mediaItem?.mediaMetadata?.artworkData
+        artworkData = null
+        artworkPublishedMediaId = null
 
         if (mediaItem == null ||
             mediaItem.mediaMetadata.extras?.getString("type") != Constants.MEDIA_TYPE_MUSIC
@@ -168,28 +178,129 @@ class BluetoothLyricsAdapter(
         Preferences.isBluetoothLyricsEnabled() && a2dpConnected
 
     private fun loadArtwork(mediaItem: MediaItem) {
-        if (artworkData != null) return
+        val embeddedArtwork = mediaItem.mediaMetadata.artworkData
+        val originalArtworkUri = mediaItem.mediaMetadata.artworkUri?.toString()
+        val coverArtId = mediaItem.mediaMetadata.extras?.getString("coverArtId")
+        val coverArtUrl = coverArtId
+            ?.takeIf { it.isNotBlank() }
+            ?.let { CustomGlideRequest.createUrl(it, ARTWORK_SIZE_PX) }
 
-        val artworkUri = mediaItem.mediaMetadata.artworkUri ?: return
+        val primaryArtwork: Any? = embeddedArtwork ?: coverArtUrl ?: originalArtworkUri
+        if (primaryArtwork == null) {
+            Log.w(TAG, "No artwork source for mediaId=${mediaItem.mediaId}")
+            return
+        }
+
+        val fallbackArtwork: Any? = when {
+            embeddedArtwork != null -> coverArtUrl ?: originalArtworkUri
+            coverArtUrl != null && originalArtworkUri != coverArtUrl -> originalArtworkUri
+            else -> null
+        }
         val mediaId = mediaItem.mediaId
+        val primaryDescription = if (embeddedArtwork != null) {
+            "embedded:${embeddedArtwork.size}bytes"
+        } else {
+            primaryArtwork.toString()
+        }
+        Log.d(
+            TAG,
+            "Loading artwork mediaId=$mediaId primary=$primaryDescription fallback=$fallbackArtwork"
+        )
+
         artworkTarget = object : CustomTarget<Bitmap>(ARTWORK_SIZE_PX, ARTWORK_SIZE_PX) {
             override fun onResourceReady(resource: Bitmap, transition: Transition<in Bitmap>?) {
-                if (activeMediaId != mediaId) return
+                if (activeMediaId != mediaId) {
+                    Log.d(TAG, "Ignoring stale artwork result for mediaId=$mediaId")
+                    return
+                }
 
+                val normalized = normalizeArtwork(resource)
                 artworkData = ByteArrayOutputStream().use { output ->
-                    resource.compress(Bitmap.CompressFormat.JPEG, ARTWORK_JPEG_QUALITY, output)
+                    normalized.compress(Bitmap.CompressFormat.JPEG, ARTWORK_JPEG_QUALITY, output)
                     output.toByteArray()
                 }
-                publishMetadata(currentLyric())
+                Log.d(
+                    TAG,
+                    "Artwork ready mediaId=$mediaId bitmap=${normalized.width}x${normalized.height} " +
+                        "rawBytes=${normalized.allocationByteCount} jpegBytes=${artworkData?.size}"
+                )
+                publishArtworkMetadata()
+            }
+
+            override fun onLoadFailed(errorDrawable: Drawable?) {
+                if (activeMediaId == mediaId) {
+                    Log.w(
+                        TAG,
+                        "Artwork load failed for mediaId=$mediaId primary=$primaryDescription " +
+                            "fallback=$fallbackArtwork"
+                    )
+                }
             }
 
             override fun onLoadCleared(placeholder: Drawable?) = Unit
         }
 
-        Glide.with(appContext)
+        val requestManager = Glide.with(appContext)
+        fun requestFor(model: Any) = requestManager
             .asBitmap()
-            .load(artworkUri)
-            .into(artworkTarget!!)
+            .load(model)
+            .centerCrop()
+            .override(ARTWORK_SIZE_PX, ARTWORK_SIZE_PX)
+
+        val request = requestFor(primaryArtwork)
+        if (fallbackArtwork != null) {
+            request.error(requestFor(fallbackArtwork))
+        }
+        request.into(artworkTarget!!)
+    }
+
+    /**
+     * NetEase normalizes MediaSession artwork to fit under a 1 MiB raw bitmap budget.
+     * A 512x512 ARGB bitmap is exactly 1 MiB, so use the same effective upper bound and
+     * force a square cover for stricter AVRCP/BIP receivers such as the Honda cluster.
+     */
+    private fun normalizeArtwork(bitmap: Bitmap): Bitmap {
+        val side = minOf(bitmap.width, bitmap.height).coerceAtLeast(1)
+        val left = ((bitmap.width - side) / 2).coerceAtLeast(0)
+        val top = ((bitmap.height - side) / 2).coerceAtLeast(0)
+        val square = if (bitmap.width == side && bitmap.height == side) {
+            bitmap
+        } else {
+            Bitmap.createBitmap(bitmap, left, top, side, side)
+        }
+
+        return if (square.width == ARTWORK_SIZE_PX && square.height == ARTWORK_SIZE_PX) {
+            square
+        } else {
+            Bitmap.createScaledBitmap(square, ARTWORK_SIZE_PX, ARTWORK_SIZE_PX, true)
+        }
+    }
+
+    private fun publishArtworkMetadata() {
+        val data = artworkData ?: return
+        val source = sourceMediaItem ?: return
+        val current = player.currentMediaItem ?: return
+        val index = player.currentMediaItemIndex
+        if (index < 0 || activeMediaId != current.mediaId) return
+        if (artworkPublishedMediaId == source.mediaId) return
+
+        val extras = Bundle(current.mediaMetadata.extras ?: source.mediaMetadata.extras ?: Bundle()).apply {
+            putBoolean(EXTRA_MANAGED_METADATA, true)
+        }
+        val metadata = current.mediaMetadata.buildUpon()
+            .setArtworkData(data, MediaMetadata.PICTURE_TYPE_FRONT_COVER)
+            .setExtras(extras)
+            .build()
+
+        if (current.mediaMetadata != metadata) {
+            player.replaceMediaItem(index, source.buildUpon().setMediaMetadata(metadata).build())
+        }
+        artworkPublishedMediaId = source.mediaId
+        Log.d(
+            TAG,
+            "Artwork published once mediaId=${source.mediaId} bytes=${data.size} " +
+                "bitmapTarget=${ARTWORK_SIZE_PX}x$ARTWORK_SIZE_PX"
+        )
     }
 
     private fun loadLyrics(mediaItem: MediaItem, generation: Int) {
@@ -218,7 +329,7 @@ class BluetoothLyricsAdapter(
                             }
                             .sortedBy { it.startMs }
                         displayedLyricIndex = -1
-                        if (shouldPublishLyrics()) updateTimedLyric()
+                        if (shouldPublishLyrics()) scheduleLyricUpdate()
                     }
 
                     override fun onFailure(call: Call<ApiResponse>, throwable: Throwable) = Unit
@@ -236,7 +347,7 @@ class BluetoothLyricsAdapter(
 
                         timedLyrics = parseLrc(response.body()?.subsonicResponse?.lyrics?.value)
                         displayedLyricIndex = -1
-                        if (shouldPublishLyrics()) updateTimedLyric()
+                        if (shouldPublishLyrics()) scheduleLyricUpdate()
                     }
 
                     override fun onFailure(call: Call<ApiResponse>, throwable: Throwable) = Unit
@@ -278,9 +389,20 @@ class BluetoothLyricsAdapter(
     private fun scheduleLyricUpdate() {
         handler.removeCallbacks(lyricTicker)
         updateTimedLyric()
-        if (shouldPublishLyrics() && player.isPlaying) {
-            handler.postDelayed(lyricTicker, LYRIC_POLL_INTERVAL_MS)
-        }
+        scheduleNextLyricTick()
+    }
+
+    private fun scheduleNextLyricTick() {
+        if (!shouldPublishLyrics() || !player.isPlaying || timedLyrics.isEmpty()) return
+
+        val effectivePosition = (player.currentPosition + LYRIC_BLUETOOTH_LEAD_MS).coerceAtLeast(0L)
+        val nextStartMs = timedLyrics.firstOrNull { it.startMs > effectivePosition }?.startMs ?: return
+        val speed = player.playbackParameters.speed.coerceAtLeast(0.1f)
+        val untilNextMs = ((nextStartMs - effectivePosition) / speed).toLong()
+        val delayMs = untilNextMs
+            .coerceAtLeast(MIN_LYRIC_SCHEDULE_DELAY_MS)
+            .coerceAtMost(MAX_LYRIC_SCHEDULE_DELAY_MS)
+        handler.postDelayed(lyricTicker, delayMs)
     }
 
     private fun updateTimedLyric() {
@@ -289,7 +411,8 @@ class BluetoothLyricsAdapter(
             activeMediaId != player.currentMediaItem?.mediaId
         ) return
 
-        val newIndex = timedLyrics.indexOfLast { it.startMs <= player.currentPosition }
+        val effectivePosition = (player.currentPosition + LYRIC_BLUETOOTH_LEAD_MS).coerceAtLeast(0L)
+        val newIndex = timedLyrics.indexOfLast { it.startMs <= effectivePosition }
         if (newIndex == displayedLyricIndex) return
 
         displayedLyricIndex = newIndex
@@ -312,29 +435,39 @@ class BluetoothLyricsAdapter(
             .map { it?.toString().orEmpty() }
             .filter { it.isNotBlank() }
             .joinToString(" - ")
-        val extras = Bundle(base.extras ?: Bundle()).apply {
+        val extras = Bundle(current.mediaMetadata.extras ?: base.extras ?: Bundle()).apply {
             putBoolean(EXTRA_MANAGED_METADATA, true)
             if (publishLyric) putString(EXTRA_CURRENT_LYRIC, lyric) else remove(EXTRA_CURRENT_LYRIC)
         }
 
-        val metadata = base.buildUpon()
+        // Match NetEase's strategy: clone the current metadata and update only TITLE/ARTIST.
+        // The already-published artwork remains unchanged, so the Bluetooth stack can reuse the
+        // same cover-art image/handle instead of treating every lyric line as a new artwork update.
+        val metadata = current.mediaMetadata.buildUpon()
             .setTitle(if (publishLyric) lyric else base.title)
             .setArtist(if (publishLyric && titleArtist.isNotBlank()) titleArtist else base.artist)
             .setDisplayTitle(songTitle)
             .setSubtitle(songArtist)
             .setExtras(extras)
-            .apply { artworkData?.let { setArtworkData(it, null) } }
             .build()
 
         if (current.mediaMetadata == metadata) return
+        Log.d(
+            TAG,
+            "Publishing lyric metadata mediaId=${source.mediaId} lyric=$publishLyric " +
+                "artworkStable=${metadata.artworkData != null}"
+        )
         player.replaceMediaItem(index, source.buildUpon().setMediaMetadata(metadata).build())
     }
 
     private companion object {
         const val EXTRA_MANAGED_METADATA = "com.cappielloantonio.tempo.bluetooth.managed_metadata"
         const val EXTRA_CURRENT_LYRIC = "com.cappielloantonio.tempo.bluetooth.current_lyric"
+        const val TAG = "BluetoothLyricsAdapter"
         const val ARTWORK_SIZE_PX = 512
-        const val ARTWORK_JPEG_QUALITY = 85
-        const val LYRIC_POLL_INTERVAL_MS = 250L
+        const val ARTWORK_JPEG_QUALITY = 90
+        const val LYRIC_BLUETOOTH_LEAD_MS = 120L
+        const val MIN_LYRIC_SCHEDULE_DELAY_MS = 16L
+        const val MAX_LYRIC_SCHEDULE_DELAY_MS = 1000L
     }
 }
