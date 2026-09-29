@@ -32,6 +32,7 @@ class MediaService : MediaLibraryService(), SessionAvailabilityListener {
     private lateinit var automotiveRepository: AutomotiveRepository
     private lateinit var player: ExoPlayer
     private lateinit var castPlayer: CastPlayer
+    private lateinit var legacyBluetoothMetadataPublisher: LegacyBluetoothMetadataPublisher
     private lateinit var mediaLibrarySession: MediaLibrarySession
     private lateinit var bluetoothLyricsAdapter: BluetoothLyricsAdapter
 
@@ -40,9 +41,15 @@ class MediaService : MediaLibraryService(), SessionAvailabilityListener {
 
         initializeRepository()
         initializePlayer()
+
         initializeCastPlayer()
         initializeMediaLibrarySession()
-        bluetoothLyricsAdapter = BluetoothLyricsAdapter(this, player).also { it.start() }
+        legacyBluetoothMetadataPublisher = LegacyBluetoothMetadataPublisher(mediaLibrarySession)
+        bluetoothLyricsAdapter = BluetoothLyricsAdapter(
+                this,
+                player,
+                legacyBluetoothMetadataPublisher::publish
+        ).also { it.start() }
         initializePlayerListener()
 
         setPlayer(

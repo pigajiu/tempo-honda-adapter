@@ -21,8 +21,34 @@
             android:defaultValue="true"
             android:title="@string/settings_bluetooth_lyrics_title"
             android:summary="@string/settings_bluetooth_lyrics_summary" />
+
+        <SeekBarPreference
+            android:key="bluetooth_lyrics_lead_ms"
+            android:dependency="bluetooth_lyrics"
+            android:max="5000"
+            app:min="0"
+            app:defaultValue="2800"
+            app:seekBarIncrement="100"
+            app:showSeekBarValue="true"
+            app:updatesContinuously="true"
+            app:title="@string/settings_bluetooth_lyrics_lead_title"
+            app:summary="@string/settings_bluetooth_lyrics_lead_summary" />
+
     </PreferenceCategory>
 
+    <PreferenceCategory app:title="@string/settings_music_tag_bridge_category">
+        <EditTextPreference
+            android:key="music_tag_bridge_url"
+            android:defaultValue="http://192.168.10.38:8003"
+            android:title="@string/settings_music_tag_bridge_url_title"
+            app:useSimpleSummaryProvider="true" />
+
+        <EditTextPreference
+            android:key="music_tag_bridge_api_key"
+            android:defaultValue=""
+            android:title="@string/settings_music_tag_bridge_api_key_title"
+            android:summary="@string/settings_music_tag_bridge_api_key_summary" />
+    </PreferenceCategory>
     <PreferenceCategory app:title="@string/settings_title_ui">
         <ListPreference
             app:defaultValue="default"

@@ -4,13 +4,16 @@ import android.annotation.SuppressLint;
 import android.content.ComponentName;
 import android.os.Bundle;
 import android.os.Handler;
+import android.os.Looper;
 import android.text.Spannable;
 import android.text.SpannableString;
 import android.text.style.ForegroundColorSpan;
 import android.util.Log;
 import android.view.LayoutInflater;
+import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewGroup;
+import android.widget.Toast;
 
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
@@ -24,8 +27,10 @@ import androidx.media3.session.SessionToken;
 import com.cappielloantonio.tempo.R;
 import com.cappielloantonio.tempo.databinding.InnerFragmentPlayerLyricsBinding;
 import com.cappielloantonio.tempo.service.MediaService;
+import com.cappielloantonio.tempo.subsonic.models.Child;
 import com.cappielloantonio.tempo.subsonic.models.Line;
 import com.cappielloantonio.tempo.subsonic.models.LyricsList;
+import com.cappielloantonio.tempo.util.MusicTagBridgeClient;
 import com.cappielloantonio.tempo.util.MusicUtil;
 import com.cappielloantonio.tempo.util.OpenSubsonicExtensionsUtil;
 import com.cappielloantonio.tempo.viewmodel.PlayerBottomSheetViewModel;
@@ -33,6 +38,7 @@ import com.google.common.util.concurrent.ListenableFuture;
 import com.google.common.util.concurrent.MoreExecutors;
 
 import java.util.List;
+import java.util.Locale;
 
 
 @OptIn(markerClass = UnstableApi.class)
@@ -45,6 +51,16 @@ public class PlayerLyricsFragment extends Fragment {
     private MediaBrowser mediaBrowser;
     private Handler syncLyricsHandler;
     private Runnable syncLyricsRunnable;
+    private int lyricsTimingOffsetMs = 0;
+    private String lyricsTimingMediaId;
+    private final Handler lyricsTimingRepeatHandler = new Handler(Looper.getMainLooper());
+    private Runnable lyricsTimingRepeatRunnable;
+    private boolean lyricsTimingRepeating;
+    private boolean lyricsTimingWriteBackInProgress;
+
+    private static final int LYRICS_TIMING_STEP_MS = 100;
+    private static final long LYRICS_TIMING_LONG_PRESS_DELAY_MS = 400L;
+    private static final long LYRICS_TIMING_REPEAT_INTERVAL_MS = 100L;
 
     @Override
     public View onCreateView(@NonNull LayoutInflater inflater, ViewGroup container, Bundle savedInstanceState) {
@@ -68,6 +84,7 @@ public class PlayerLyricsFragment extends Fragment {
     @Override
     public void onStart() {
         super.onStart();
+        resetLyricsTimingOffset();
         initializeBrowser();
 
     }
@@ -92,6 +109,7 @@ public class PlayerLyricsFragment extends Fragment {
 
     @Override
     public void onDestroyView() {
+        stopLyricsTimingRepeat();
         super.onDestroyView();
         bind = null;
     }
@@ -99,6 +117,191 @@ public class PlayerLyricsFragment extends Fragment {
     private void initOverlay() {
         bind.syncLyricsTapButton.setOnClickListener(view -> {
             playerBottomSheetViewModel.changeSyncLyricsState();
+        });
+
+        configureTimingAdjustmentButton(
+                bind.lyricsTimingDelayButton,
+                LYRICS_TIMING_STEP_MS
+        );
+        configureTimingAdjustmentButton(
+                bind.lyricsTimingAdvanceButton,
+                -LYRICS_TIMING_STEP_MS
+        );
+        bind.lyricsTimingWriteBackButton.setOnClickListener(view ->
+                applyLyricsTimingOffsetToSource()
+        );
+
+        resetLyricsTimingOffset();
+    }
+
+    @SuppressLint("ClickableViewAccessibility")
+    private void configureTimingAdjustmentButton(View button, int deltaMs) {
+        button.setOnClickListener(view -> adjustLyricsTimingOffset(deltaMs));
+        button.setOnTouchListener((view, event) -> {
+            switch (event.getActionMasked()) {
+                case MotionEvent.ACTION_DOWN:
+                    view.setPressed(true);
+                    lyricsTimingRepeating = false;
+                    lyricsTimingRepeatRunnable = new Runnable() {
+                        @Override
+                        public void run() {
+                            lyricsTimingRepeating = true;
+                            adjustLyricsTimingOffset(deltaMs);
+                            lyricsTimingRepeatHandler.postDelayed(
+                                    this,
+                                    LYRICS_TIMING_REPEAT_INTERVAL_MS
+                            );
+                        }
+                    };
+                    lyricsTimingRepeatHandler.postDelayed(
+                            lyricsTimingRepeatRunnable,
+                            LYRICS_TIMING_LONG_PRESS_DELAY_MS
+                    );
+                    return true;
+
+                case MotionEvent.ACTION_UP:
+                    view.setPressed(false);
+                    stopLyricsTimingRepeat();
+                    if (!lyricsTimingRepeating) {
+                        view.performClick();
+                    }
+                    lyricsTimingRepeating = false;
+                    return true;
+
+                case MotionEvent.ACTION_CANCEL:
+                    view.setPressed(false);
+                    stopLyricsTimingRepeat();
+                    lyricsTimingRepeating = false;
+                    return true;
+
+                default:
+                    return true;
+            }
+        });
+    }
+
+    private void stopLyricsTimingRepeat() {
+        if (lyricsTimingRepeatRunnable != null) {
+            lyricsTimingRepeatHandler.removeCallbacks(lyricsTimingRepeatRunnable);
+            lyricsTimingRepeatRunnable = null;
+        }
+    }
+
+    private void adjustLyricsTimingOffset(int deltaMs) {
+        lyricsTimingOffsetMs += deltaMs;
+        updateLyricsTimingOffsetLabel();
+
+        if (mediaBrowser != null && bind != null) {
+            displaySyncedLyrics();
+        }
+    }
+
+    private void resetLyricsTimingOffset() {
+        lyricsTimingOffsetMs = 0;
+        updateLyricsTimingOffsetLabel();
+    }
+
+    @SuppressLint("DefaultLocale")
+    private void updateLyricsTimingOffsetLabel() {
+        if (bind == null) return;
+
+        String value = lyricsTimingOffsetMs == 0
+                ? "0.0s"
+                : String.format(Locale.US, "%+.1fs", lyricsTimingOffsetMs / 1000.0);
+        bind.lyricsTimingOffsetTextView.setText(value);
+        bind.lyricsTimingWriteBackButton.setEnabled(
+                !lyricsTimingWriteBackInProgress
+                        && lyricsTimingOffsetMs != 0
+        );
+    }
+
+    private void applyLyricsTimingOffsetToSource() {
+        if (lyricsTimingWriteBackInProgress || lyricsTimingOffsetMs == 0) return;
+
+        Child media = playerBottomSheetViewModel.getLiveMedia().getValue();
+        String musicPath = media != null ? media.getPath() : null;
+
+        if (musicPath == null || musicPath.trim().isEmpty()) {
+            Toast.makeText(
+                    requireContext(),
+                    R.string.lyrics_timing_write_back_missing_path,
+                    Toast.LENGTH_SHORT
+            ).show();
+            return;
+        }
+
+        final int appliedOffsetMs = lyricsTimingOffsetMs;
+        lyricsTimingWriteBackInProgress = true;
+        setTimingAdjustmentControlsEnabled(false);
+        updateLyricsTimingOffsetLabel();
+
+        MusicTagBridgeClient.applyLyricsOffset(
+                musicPath,
+                appliedOffsetMs,
+                new MusicTagBridgeClient.Callback() {
+                    @Override
+                    public void onSuccess(int timestampsChanged, int timestampsClamped) {
+                        if (bind == null || !isAdded()) return;
+
+                        applyOffsetToInMemoryLyrics(appliedOffsetMs);
+                        lyricsTimingOffsetMs = 0;
+                        lyricsTimingWriteBackInProgress = false;
+                        setTimingAdjustmentControlsEnabled(true);
+                        updateLyricsTimingOffsetLabel();
+
+                        if (mediaBrowser != null) {
+                            displaySyncedLyrics();
+                        }
+
+                        Toast.makeText(
+                                requireContext(),
+                                R.string.lyrics_timing_write_back_success,
+                                Toast.LENGTH_SHORT
+                        ).show();
+                    }
+
+                    @Override
+                    public void onError(String message) {
+                        if (bind == null || !isAdded()) return;
+
+                        lyricsTimingWriteBackInProgress = false;
+                        setTimingAdjustmentControlsEnabled(true);
+                        updateLyricsTimingOffsetLabel();
+
+                        Toast.makeText(
+                                requireContext(),
+                                getString(
+                                        R.string.lyrics_timing_write_back_failed,
+                                        message
+                                ),
+                                Toast.LENGTH_LONG
+                        ).show();
+                    }
+                }
+        );
+    }
+
+    private void setTimingAdjustmentControlsEnabled(boolean enabled) {
+        if (bind == null) return;
+        bind.lyricsTimingDelayButton.setEnabled(enabled);
+        bind.lyricsTimingAdvanceButton.setEnabled(enabled);
+    }
+
+    private void applyOffsetToInMemoryLyrics(int offsetMs) {
+        LyricsList lyricsList = playerBottomSheetViewModel
+                .getLiveLyricsList()
+                .getValue();
+
+        if (lyricsList == null || lyricsList.getStructuredLyrics() == null) return;
+
+        lyricsList.getStructuredLyrics().forEach(structured -> {
+            if (structured == null || structured.getLine() == null) return;
+
+            structured.getLine().forEach(line -> {
+                if (line != null && line.getStart() != null) {
+                    line.setStart(Math.max(0, line.getStart() + offsetMs));
+                }
+            });
         });
     }
 
@@ -129,6 +332,18 @@ public class PlayerLyricsFragment extends Fragment {
     }
 
     private void initPanelContent() {
+        playerBottomSheetViewModel.getLiveMedia().observe(getViewLifecycleOwner(), media -> {
+            String mediaId = media != null ? media.getId() : null;
+            boolean changed = mediaId == null
+                    ? lyricsTimingMediaId != null
+                    : !mediaId.equals(lyricsTimingMediaId);
+
+            if (changed || lyricsTimingMediaId == null) {
+                lyricsTimingMediaId = mediaId;
+                resetLyricsTimingOffset();
+            }
+        });
+
         if (OpenSubsonicExtensionsUtil.isSongLyricsExtensionAvailable()) {
             playerBottomSheetViewModel.getLiveLyricsList().observe(getViewLifecycleOwner(), lyricsList -> {
                 setPanelContent(null, lyricsList);
@@ -151,23 +366,31 @@ public class PlayerLyricsFragment extends Fragment {
                     bind.emptyDescriptionImageView.setVisibility(View.GONE);
                     bind.titleEmptyDescriptionLabel.setVisibility(View.GONE);
                     bind.syncLyricsTapButton.setVisibility(View.GONE);
+                    bind.lyricsTimingAdjustmentPanel.setVisibility(View.GONE);
                 } else if (lyricsList != null && lyricsList.getStructuredLyrics() != null) {
                     setSyncLirics(lyricsList);
                     bind.nowPlayingSongLyricsTextView.setVisibility(View.VISIBLE);
                     bind.emptyDescriptionImageView.setVisibility(View.GONE);
                     bind.titleEmptyDescriptionLabel.setVisibility(View.GONE);
-                    bind.syncLyricsTapButton.setVisibility(View.VISIBLE);
+
+                    boolean hasSyncedLyrics = !lyricsList.getStructuredLyrics().isEmpty()
+                            && lyricsList.getStructuredLyrics().get(0) != null
+                            && lyricsList.getStructuredLyrics().get(0).getSynced();
+                    bind.syncLyricsTapButton.setVisibility(hasSyncedLyrics ? View.VISIBLE : View.GONE);
+                    bind.lyricsTimingAdjustmentPanel.setVisibility(hasSyncedLyrics ? View.VISIBLE : View.GONE);
                 } else if (description != null && !description.trim().equals("")) {
                     bind.nowPlayingSongLyricsTextView.setText(MusicUtil.getReadableLyrics(description));
                     bind.nowPlayingSongLyricsTextView.setVisibility(View.VISIBLE);
                     bind.emptyDescriptionImageView.setVisibility(View.GONE);
                     bind.titleEmptyDescriptionLabel.setVisibility(View.GONE);
                     bind.syncLyricsTapButton.setVisibility(View.GONE);
+                    bind.lyricsTimingAdjustmentPanel.setVisibility(View.GONE);
                 } else {
                     bind.nowPlayingSongLyricsTextView.setVisibility(View.GONE);
                     bind.emptyDescriptionImageView.setVisibility(View.VISIBLE);
                     bind.titleEmptyDescriptionLabel.setVisibility(View.VISIBLE);
                     bind.syncLyricsTapButton.setVisibility(View.GONE);
+                    bind.lyricsTimingAdjustmentPanel.setVisibility(View.GONE);
                 }
             }
         });
@@ -218,7 +441,8 @@ public class PlayerLyricsFragment extends Fragment {
 
     private void displaySyncedLyrics() {
         LyricsList lyricsList = playerBottomSheetViewModel.getLiveLyricsList().getValue();
-        int timestamp = (int) (mediaBrowser.getCurrentPosition());
+        long adjustedTimestamp = mediaBrowser.getCurrentPosition() - lyricsTimingOffsetMs;
+        int timestamp = (int) Math.max(0L, adjustedTimestamp);
 
         if (lyricsList != null && lyricsList.getStructuredLyrics() != null && !lyricsList.getStructuredLyrics().isEmpty() && lyricsList.getStructuredLyrics().get(0).getLine() != null) {
             StringBuilder lyricsBuilder = new StringBuilder();

@@ -42,9 +42,16 @@ import java.io.ByteArrayOutputStream
  */
 class BluetoothLyricsAdapter(
     context: Context,
-    private val player: Player
+    private val player: Player,
+    private val sessionMetadataPublisher: ((MediaMetadata?) -> Unit)? = null
 ) : Player.Listener, SharedPreferences.OnSharedPreferenceChangeListener {
     private data class TimedLyric(val startMs: Long, val text: String)
+    private data class EncodedArtwork(
+        val data: ByteArray,
+        val width: Int,
+        val height: Int,
+        val quality: Int
+    )
 
     private val appContext = context.applicationContext
     private val handler = Handler(Looper.getMainLooper())
@@ -54,10 +61,14 @@ class BluetoothLyricsAdapter(
     private val lrcTimestamp = Regex("\\[(\\d{1,3}):(\\d{1,2})(?:[.:](\\d{1,3}))?]")
 
     private var sourceMediaItem: MediaItem? = null
+    private var sessionMetadata: MediaMetadata? = null
     private var activeMediaId: String? = null
     private var timedLyrics: List<TimedLyric> = emptyList()
     private var displayedLyricIndex = -1
     private var artworkData: ByteArray? = null
+    private var artworkWidth = 0
+    private var artworkHeight = 0
+    private var artworkQuality = 0
     private var artworkPublishedMediaId: String? = null
     private var requestGeneration = 0
     private var a2dpConnected = false
@@ -67,6 +78,15 @@ class BluetoothLyricsAdapter(
         override fun run() {
             updateTimedLyric()
             scheduleNextLyricTick()
+        }
+    }
+
+    private val a2dpWatcher = object : Runnable {
+        override fun run() {
+            updateA2dpState()
+            if (player.isPlaying) {
+                handler.postDelayed(this, A2DP_STATE_CHECK_MS)
+            }
         }
     }
 
@@ -86,6 +106,7 @@ class BluetoothLyricsAdapter(
         a2dpConnected = isA2dpConnected()
         player.addListener(this)
         handleMediaItem(player.currentMediaItem)
+        if (player.isPlaying) startA2dpWatcher()
     }
 
     fun release() {
@@ -93,13 +114,16 @@ class BluetoothLyricsAdapter(
         handler.removeCallbacksAndMessages(null)
         artworkTarget?.let { Glide.with(appContext).clear(it) }
         artworkTarget = null
+        sessionMetadataPublisher?.invoke(null)
         player.removeListener(this)
         audioManager.unregisterAudioDeviceCallback(audioDeviceCallback)
         sharedPreferences.unregisterOnSharedPreferenceChangeListener(this)
     }
 
     override fun onSharedPreferenceChanged(preferences: SharedPreferences, key: String?) {
-        if (key != Preferences.BLUETOOTH_LYRICS) return
+        if (key != Preferences.BLUETOOTH_LYRICS &&
+            key != Preferences.BLUETOOTH_LYRICS_LEAD_MS
+        ) return
 
         displayedLyricIndex = -1
         if (shouldPublishLyrics()) {
@@ -116,10 +140,16 @@ class BluetoothLyricsAdapter(
     }
 
     override fun onIsPlayingChanged(isPlaying: Boolean) {
-        if (isPlaying && shouldPublishLyrics()) {
-            scheduleLyricUpdate()
+        if (isPlaying) {
+            startA2dpWatcher()
+            updateA2dpState()
+            if (a2dpConnected) {
+                republishBluetoothMetadata("playback-start")
+                if (shouldPublishLyrics()) scheduleLyricUpdate()
+            }
         } else {
             handler.removeCallbacks(lyricTicker)
+            handler.removeCallbacks(a2dpWatcher)
         }
     }
 
@@ -157,11 +187,16 @@ class BluetoothLyricsAdapter(
         handler.removeCallbacks(lyricTicker)
         artworkTarget?.let { Glide.with(appContext).clear(it) }
         artworkTarget = null
+        sessionMetadataPublisher?.invoke(null)
         sourceMediaItem = mediaItem
+        sessionMetadata = mediaItem?.mediaMetadata
         activeMediaId = mediaItem?.mediaId
         timedLyrics = emptyList()
         displayedLyricIndex = -1
         artworkData = null
+        artworkWidth = 0
+        artworkHeight = 0
+        artworkQuality = 0
         artworkPublishedMediaId = null
 
         if (mediaItem == null ||
@@ -173,23 +208,63 @@ class BluetoothLyricsAdapter(
         if (shouldPublishLyrics()) scheduleLyricUpdate()
     }
 
+    private fun startA2dpWatcher() {
+        handler.removeCallbacks(a2dpWatcher)
+        updateA2dpState()
+        if (player.isPlaying) {
+            handler.postDelayed(a2dpWatcher, A2DP_STATE_CHECK_MS)
+        }
+    }
+
     private fun updateA2dpState() {
         val connected = isA2dpConnected()
         if (connected == a2dpConnected) return
 
         a2dpConnected = connected
         displayedLyricIndex = -1
-        if (shouldPublishLyrics()) {
-            scheduleLyricUpdate()
+        Log.i(TAG, "A2DP state changed connected=$connected")
+
+        if (connected) {
+            republishBluetoothMetadata("a2dp-connected")
+            if (shouldPublishLyrics() && player.isPlaying) {
+                scheduleLyricUpdate()
+            }
         } else {
             handler.removeCallbacks(lyricTicker)
             publishMetadata(null)
         }
     }
 
+    private fun republishBluetoothMetadata(reason: String) {
+        if (!a2dpConnected) return
+
+        // Force the legacy MediaSessionCompat path to emit a fresh metadata event when
+        // a receiver reconnects. AVRCP receivers can otherwise keep the empty metadata
+        // they obtained during connection setup if the song/lyric text itself did not change.
+        sessionMetadataPublisher?.invoke(null)
+
+        val lyric = if (Preferences.isBluetoothLyricsEnabled() && timedLyrics.isNotEmpty()) {
+            val lyricLeadMs = Preferences.getBluetoothLyricsLeadMs().toLong()
+            val effectivePosition = (player.currentPosition + lyricLeadMs).coerceAtLeast(0L)
+            displayedLyricIndex = timedLyrics.indexOfLast { it.startMs <= effectivePosition }
+            currentLyric()
+        } else {
+            null
+        }
+
+        Log.i(
+            TAG,
+            "Force republish Bluetooth metadata reason=$reason connected=$a2dpConnected " +
+                "positionMs=${player.currentPosition} lyric=$lyric artwork=${sessionMetadata?.artworkData != null}"
+        )
+        publishMetadata(lyric, force = true)
+    }
+
+    @Suppress("DEPRECATION")
     private fun isA2dpConnected(): Boolean =
-        audioManager.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
-            .any { it.type == AudioDeviceInfo.TYPE_BLUETOOTH_A2DP }
+        audioManager.isBluetoothA2dpOn ||
+            audioManager.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
+                .any { it.type == AudioDeviceInfo.TYPE_BLUETOOTH_A2DP }
 
     private fun shouldPublishLyrics(): Boolean =
         Preferences.isBluetoothLyricsEnabled() && a2dpConnected
@@ -231,15 +306,16 @@ class BluetoothLyricsAdapter(
                     return
                 }
 
-                val normalized = normalizeArtwork(resource)
-                artworkData = ByteArrayOutputStream().use { output ->
-                    normalized.compress(Bitmap.CompressFormat.JPEG, ARTWORK_JPEG_QUALITY, output)
-                    output.toByteArray()
-                }
+                val encoded = encodeArtwork(resource)
+                artworkData = encoded.data
+                artworkWidth = encoded.width
+                artworkHeight = encoded.height
+                artworkQuality = encoded.quality
                 Log.d(
                     TAG,
-                    "Artwork ready mediaId=$mediaId bitmap=${normalized.width}x${normalized.height} " +
-                        "rawBytes=${normalized.allocationByteCount} jpegBytes=${artworkData?.size}"
+                    "Artwork ready mediaId=$mediaId bitmap=${encoded.width}x${encoded.height} " +
+                        "jpegQuality=${encoded.quality} jpegBytes=${encoded.data.size} " +
+                        "targetMaxBytes=$MAX_ARTWORK_JPEG_BYTES"
                 )
                 publishArtworkMetadata()
             }
@@ -272,11 +348,11 @@ class BluetoothLyricsAdapter(
     }
 
     /**
-     * NetEase normalizes MediaSession artwork to fit under a 1 MiB raw bitmap budget.
-     * A 512x512 ARGB bitmap is exactly 1 MiB, so use the same effective upper bound and
-     * force a square cover for stricter AVRCP/BIP receivers such as the Honda cluster.
+     * Keep AVRCP/BIP artwork conservative for receivers with small image buffers.
+     * Prefer 512x512 and reduce JPEG quality first; only reduce dimensions when the
+     * encoded image still exceeds the target byte size.
      */
-    private fun normalizeArtwork(bitmap: Bitmap): Bitmap {
+    private fun encodeArtwork(bitmap: Bitmap): EncodedArtwork {
         val side = minOf(bitmap.width, bitmap.height).coerceAtLeast(1)
         val left = ((bitmap.width - side) / 2).coerceAtLeast(0)
         val top = ((bitmap.height - side) / 2).coerceAtLeast(0)
@@ -286,11 +362,26 @@ class BluetoothLyricsAdapter(
             Bitmap.createBitmap(bitmap, left, top, side, side)
         }
 
-        return if (square.width == ARTWORK_SIZE_PX && square.height == ARTWORK_SIZE_PX) {
-            square
-        } else {
-            Bitmap.createScaledBitmap(square, ARTWORK_SIZE_PX, ARTWORK_SIZE_PX, true)
+        var lastResult: EncodedArtwork? = null
+        for (size in ARTWORK_SIZE_STEPS) {
+            val scaled = if (square.width == size && square.height == size) {
+                square
+            } else {
+                Bitmap.createScaledBitmap(square, size, size, true)
+            }
+
+            for (quality in ARTWORK_JPEG_QUALITIES) {
+                val data = ByteArrayOutputStream().use { output ->
+                    scaled.compress(Bitmap.CompressFormat.JPEG, quality, output)
+                    output.toByteArray()
+                }
+                val result = EncodedArtwork(data, scaled.width, scaled.height, quality)
+                lastResult = result
+                if (data.size <= MAX_ARTWORK_JPEG_BYTES) return result
+            }
         }
+
+        return checkNotNull(lastResult)
     }
 
     private fun publishArtworkMetadata() {
@@ -301,22 +392,23 @@ class BluetoothLyricsAdapter(
         if (index < 0 || activeMediaId != current.mediaId) return
         if (artworkPublishedMediaId == source.mediaId) return
 
-        val extras = Bundle(current.mediaMetadata.extras ?: source.mediaMetadata.extras ?: Bundle()).apply {
+        val baseMetadata = sessionMetadata ?: current.mediaMetadata
+        val extras = Bundle(baseMetadata.extras ?: source.mediaMetadata.extras ?: Bundle()).apply {
             putBoolean(EXTRA_MANAGED_METADATA, true)
         }
-        val metadata = current.mediaMetadata.buildUpon()
+        val metadata = baseMetadata.buildUpon()
             .setArtworkData(data, MediaMetadata.PICTURE_TYPE_FRONT_COVER)
             .setExtras(extras)
             .build()
 
-        if (current.mediaMetadata != metadata) {
-            player.replaceMediaItem(index, source.buildUpon().setMediaMetadata(metadata).build())
+        if (sessionMetadata != metadata) {
+            dispatchSessionMetadata(metadata)
         }
         artworkPublishedMediaId = source.mediaId
         Log.d(
             TAG,
             "Artwork published once mediaId=${source.mediaId} bytes=${data.size} " +
-                "bitmapTarget=${ARTWORK_SIZE_PX}x$ARTWORK_SIZE_PX"
+                "bitmap=${artworkWidth}x$artworkHeight jpegQuality=$artworkQuality"
         )
     }
 
@@ -426,7 +518,8 @@ class BluetoothLyricsAdapter(
     private fun scheduleNextLyricTick() {
         if (!shouldPublishLyrics() || !player.isPlaying || timedLyrics.isEmpty()) return
 
-        val effectivePosition = (player.currentPosition + LYRIC_BLUETOOTH_LEAD_MS).coerceAtLeast(0L)
+        val lyricLeadMs = Preferences.getBluetoothLyricsLeadMs().toLong()
+        val effectivePosition = (player.currentPosition + lyricLeadMs).coerceAtLeast(0L)
         val nextStartMs = timedLyrics.firstOrNull { it.startMs > effectivePosition }?.startMs ?: return
         val speed = player.playbackParameters.speed.coerceAtLeast(0.1f)
         val untilNextMs = ((nextStartMs - effectivePosition) / speed).toLong()
@@ -442,17 +535,26 @@ class BluetoothLyricsAdapter(
             activeMediaId != player.currentMediaItem?.mediaId
         ) return
 
-        val effectivePosition = (player.currentPosition + LYRIC_BLUETOOTH_LEAD_MS).coerceAtLeast(0L)
+        val playerPosition = player.currentPosition.coerceAtLeast(0L)
+        val lyricLeadMs = Preferences.getBluetoothLyricsLeadMs().toLong()
+        val effectivePosition = (playerPosition + lyricLeadMs).coerceAtLeast(0L)
         val newIndex = timedLyrics.indexOfLast { it.startMs <= effectivePosition }
         if (newIndex == displayedLyricIndex) return
 
         displayedLyricIndex = newIndex
-        publishMetadata(currentLyric())
+        val lyric = currentLyric()
+        val lyricStartMs = timedLyrics.getOrNull(newIndex)?.startMs
+        Log.i(
+            TAG,
+            "Lyric publish mediaId=$activeMediaId positionMs=$playerPosition " +
+                "lyricStartMs=$lyricStartMs leadMs=$lyricLeadMs text=$lyric"
+        )
+        publishMetadata(lyric)
     }
 
     private fun currentLyric(): String? = timedLyrics.getOrNull(displayedLyricIndex)?.text
 
-    private fun publishMetadata(lyric: String?) {
+    private fun publishMetadata(lyric: String?, force: Boolean = false) {
         val source = sourceMediaItem ?: return
         val current = player.currentMediaItem ?: return
         val index = player.currentMediaItemIndex
@@ -466,15 +568,16 @@ class BluetoothLyricsAdapter(
             .map { it?.toString().orEmpty() }
             .filter { it.isNotBlank() }
             .joinToString(" - ")
-        val extras = Bundle(current.mediaMetadata.extras ?: base.extras ?: Bundle()).apply {
+        val currentSessionMetadata = sessionMetadata ?: current.mediaMetadata
+        val extras = Bundle(currentSessionMetadata.extras ?: base.extras ?: Bundle()).apply {
             putBoolean(EXTRA_MANAGED_METADATA, true)
             if (publishLyric) putString(EXTRA_CURRENT_LYRIC, lyric) else remove(EXTRA_CURRENT_LYRIC)
         }
 
-        // Match NetEase's strategy: clone the current metadata and update only TITLE/ARTIST.
-        // The already-published artwork remains unchanged, so the Bluetooth stack can reuse the
-        // same cover-art image/handle instead of treating every lyric line as a new artwork update.
-        val metadata = current.mediaMetadata.buildUpon()
+        // Match NetEase's strategy more closely: update only the MediaSession-facing metadata.
+        // The ExoPlayer playlist/current MediaItem stays untouched, so lyric changes are emitted
+        // as a lightweight MEDIA_METADATA_CHANGED event instead of replaceMediaItem().
+        val metadata = currentSessionMetadata.buildUpon()
             .setTitle(if (publishLyric) lyric else base.title)
             .setArtist(if (publishLyric && titleArtist.isNotBlank()) titleArtist else base.artist)
             .setDisplayTitle(songTitle)
@@ -482,12 +585,28 @@ class BluetoothLyricsAdapter(
             .setExtras(extras)
             .build()
 
-        if (current.mediaMetadata == metadata) return
-        Log.d(
+        if (!force && sessionMetadata == metadata) return
+        Log.i(
             TAG,
-            "Publishing lyric metadata mediaId=${source.mediaId} lyric=$publishLyric " +
+            "Publishing direct session metadata mediaId=${source.mediaId} lyric=$publishLyric " +
                 "artworkStable=${metadata.artworkData != null}"
         )
+        dispatchSessionMetadata(metadata)
+    }
+
+    private fun dispatchSessionMetadata(metadata: MediaMetadata) {
+        sessionMetadata = metadata
+        val publisher = sessionMetadataPublisher
+        if (publisher != null) {
+            publisher(metadata)
+            return
+        }
+
+        // Compatibility fallback for flavors that still bind MediaSession directly to ExoPlayer.
+        val source = sourceMediaItem ?: return
+        val current = player.currentMediaItem ?: return
+        val index = player.currentMediaItemIndex
+        if (index < 0 || activeMediaId != current.mediaId) return
         player.replaceMediaItem(index, source.buildUpon().setMediaMetadata(metadata).build())
     }
 
@@ -497,8 +616,10 @@ class BluetoothLyricsAdapter(
         private const val LYRICS_CACHE_PREFS = "bluetooth_lyrics_cache"
         private const val TAG = "BluetoothLyricsAdapter"
         private const val ARTWORK_SIZE_PX = 512
-        private const val ARTWORK_JPEG_QUALITY = 90
-        private const val LYRIC_BLUETOOTH_LEAD_MS = 120L
+        private const val MAX_ARTWORK_JPEG_BYTES = 40 * 1024
+        private val ARTWORK_SIZE_STEPS = intArrayOf(512, 448, 384, 320, 256)
+        private val ARTWORK_JPEG_QUALITIES = intArrayOf(90, 85, 80)
+        private const val A2DP_STATE_CHECK_MS = 500L
         private const val MIN_LYRIC_SCHEDULE_DELAY_MS = 16L
         private const val MAX_LYRIC_SCHEDULE_DELAY_MS = 1000L
         private val cacheLrcTimestamp = Regex("\\[(\\d{1,3}):(\\d{1,2})(?:[.:](\\d{1,3}))?]")

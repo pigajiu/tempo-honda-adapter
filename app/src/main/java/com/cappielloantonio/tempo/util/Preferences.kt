@@ -10,6 +10,9 @@ import com.google.gson.Gson
 object Preferences {
     const val THEME = "theme"
     const val BLUETOOTH_LYRICS = "bluetooth_lyrics"
+    const val BLUETOOTH_LYRICS_LEAD_MS = "bluetooth_lyrics_lead_ms"
+    const val MUSIC_TAG_BRIDGE_URL = "music_tag_bridge_url"
+    const val MUSIC_TAG_BRIDGE_API_KEY = "music_tag_bridge_api_key"
     private const val SERVER = "server"
     private const val USER = "user"
     private const val PASSWORD = "password"
@@ -502,4 +505,28 @@ object Preferences {
     fun isBluetoothLyricsEnabled(): Boolean {
         return App.getInstance().preferences.getBoolean(BLUETOOTH_LYRICS, true)
     }
+
+    @JvmStatic
+    fun getBluetoothLyricsLeadMs(): Int {
+        return App.getInstance().preferences
+            .getInt(BLUETOOTH_LYRICS_LEAD_MS, 2800)
+            .coerceIn(0, 5000)
+    }
+
+    @JvmStatic
+    fun getMusicTagBridgeUrl(): String {
+        return App.getInstance().preferences
+            .getString(MUSIC_TAG_BRIDGE_URL, "http://192.168.10.38:8003")
+            ?.trim()
+            .orEmpty()
+    }
+
+    @JvmStatic
+    fun getMusicTagBridgeApiKey(): String {
+        return App.getInstance().preferences
+            .getString(MUSIC_TAG_BRIDGE_API_KEY, "")
+            ?.trim()
+            .orEmpty()
+    }
+
 }

@@ -418,4 +418,19 @@
     <string name="settings_bluetooth_lyrics_category">Bluetooth lyrics</string>
     <string name="settings_bluetooth_lyrics_title">Show synchronized lyrics on Bluetooth displays</string>
     <string name="settings_bluetooth_lyrics_summary">When A2DP is connected, publish the current lyric as the AVRCP title and keep the song and artist on the artist line.</string>
+    <string name="settings_bluetooth_lyrics_lead_title">Bluetooth lyric advance (ms)</string>
+    <string name="settings_bluetooth_lyrics_lead_summary">Send lyrics early to compensate for Bluetooth display delay. Range: 0–5000 ms, step: 100 ms.</string>
+    <string name="lyrics_timing_delay_button_description">Delay lyrics by 0.1 seconds</string>
+    <string name="lyrics_timing_advance_button_description">Advance lyrics by 0.1 seconds</string>
+    <string name="lyrics_timing_offset_description">Temporary lyric timing offset</string>
+
+    <string name="lyrics_timing_write_back_short">Save</string>
+    <string name="lyrics_timing_write_back_description">Write the current lyric timing offset back to the source music file</string>
+    <string name="lyrics_timing_write_back_success">Lyrics timing saved to the source file</string>
+    <string name="lyrics_timing_write_back_missing_path">Current song path is unavailable</string>
+    <string name="lyrics_timing_write_back_failed">Failed to save lyrics timing: %1$s</string>
+    <string name="settings_music_tag_bridge_category">Music Tag bridge</string>
+    <string name="settings_music_tag_bridge_url_title">Bridge service URL</string>
+    <string name="settings_music_tag_bridge_api_key_title">Bridge API key</string>
+    <string name="settings_music_tag_bridge_api_key_summary">Optional. Must match BRIDGE_API_KEY on the bridge service.</string>
 </resources>

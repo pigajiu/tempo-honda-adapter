@@ -399,4 +399,19 @@
     <string name="settings_bluetooth_lyrics_category">蓝牙歌词</string>
     <string name="settings_bluetooth_lyrics_title">在蓝牙设备上显示同步歌词</string>
     <string name="settings_bluetooth_lyrics_summary">连接 A2DP 后，将当前歌词作为 AVRCP 标题发送，并在歌手栏保留歌名和歌手。</string>
+    <string name="settings_bluetooth_lyrics_lead_title">蓝牙歌词提前量（毫秒）</string>
+    <string name="settings_bluetooth_lyrics_lead_summary">提前发送歌词以补偿蓝牙设备显示延迟。范围 0–5000 毫秒，每次调整 100 毫秒。</string>
+    <string name="lyrics_timing_delay_button_description">歌词延后 0.1 秒</string>
+    <string name="lyrics_timing_advance_button_description">歌词提前 0.1 秒</string>
+    <string name="lyrics_timing_offset_description">临时歌词时间偏移</string>
+
+    <string name="lyrics_timing_write_back_short">写回</string>
+    <string name="lyrics_timing_write_back_description">将当前歌词时间偏移写回源音乐文件</string>
+    <string name="lyrics_timing_write_back_success">歌词时间已写回源文件</string>
+    <string name="lyrics_timing_write_back_missing_path">无法获取当前歌曲路径</string>
+    <string name="lyrics_timing_write_back_failed">歌词写回失败：%1$s</string>
+    <string name="settings_music_tag_bridge_category">Music Tag 写回服务</string>
+    <string name="settings_music_tag_bridge_url_title">Bridge 服务地址</string>
+    <string name="settings_music_tag_bridge_api_key_title">Bridge API Key</string>
+    <string name="settings_music_tag_bridge_api_key_summary">可选，需要与 bridge 服务端的 BRIDGE_API_KEY 一致。</string>
 </resources>
